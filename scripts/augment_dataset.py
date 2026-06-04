@@ -35,13 +35,12 @@ BG_COLOR = (15, 20, 30)   # used as border fill for spatial transforms
 # ── Augmentation pipeline ─────────────────────────────────────────────────────
 TRANSFORM = A.Compose([
     # Spatial — applied to BOTH image and mask identically
-    A.ShiftScaleRotate(
-        shift_limit=0.15,
-        scale_limit=0.20,
-        rotate_limit=25,
+    A.Affine(
+        translate_percent={"x": (-0.15, 0.15), "y": (-0.15, 0.15)},
+        scale=(0.80, 1.20),
+        rotate=(-25, 25),
         border_mode=cv2.BORDER_CONSTANT,
         fill=BG_COLOR,
-        mask_fill=0,
         p=0.85,
     ),
     A.HorizontalFlip(p=0.5),
@@ -49,7 +48,7 @@ TRANSFORM = A.Compose([
 
     # Pixel — applied to image only (mask is untouched by these)
     A.GaussianBlur(blur_limit=(3, 9), p=0.60),
-    A.GaussNoise(std_limit=(10.0 / 255, 60.0 / 255), p=0.60),
+    A.GaussNoise(std_range=(0.04, 0.24), p=0.60),
     A.RandomBrightnessContrast(brightness_limit=0.30, contrast_limit=0.30, p=0.80),
     A.HueSaturationValue(
         hue_shift_limit=10,
