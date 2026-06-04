@@ -1,0 +1,7 @@
+numpy>=1.24
+opencv-python>=4.8
+albumentations>=1.3
+gradio>=4.0
+roboflow>=1.1
+pycocotools
+tqdm

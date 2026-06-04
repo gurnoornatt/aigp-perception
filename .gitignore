@@ -5,3 +5,6 @@ __pycache__/
 venv/
 *.egg-info/
 .DS_Store
+
+# Generated dataset — binary, large, reproducible from scripts
+data/
