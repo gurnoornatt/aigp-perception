@@ -5,3 +5,6 @@ gradio>=4.0
 roboflow>=1.1
 pycocotools
 tqdm
+torch>=2.0
+torchvision>=0.15
+segmentation-models-pytorch>=0.3
