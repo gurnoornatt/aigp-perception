@@ -30,11 +30,18 @@ AUG_IMG_DIR.mkdir(parents=True, exist_ok=True)
 AUG_MASK_DIR.mkdir(parents=True, exist_ok=True)
 
 AUGMENTATIONS_PER_BASE = 20
+IMG_H, IMG_W = 360, 640
 BG_COLOR = (15, 20, 30)   # used as border fill for spatial transforms
 
 # ── Augmentation pipeline ─────────────────────────────────────────────────────
 TRANSFORM = A.Compose([
     # Spatial — applied to BOTH image and mask identically
+    A.RandomResizedCrop(
+        size=(IMG_H, IMG_W),
+        scale=(0.75, 1.0),
+        ratio=(0.9, 1.1),
+        p=0.5,
+    ),
     A.Affine(
         translate_percent={"x": (-0.15, 0.15), "y": (-0.15, 0.15)},
         scale=(0.80, 1.20),

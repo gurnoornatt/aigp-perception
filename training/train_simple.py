@@ -97,19 +97,27 @@ def val_epoch(model, loader):
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-def main(epochs: int = 100, batch_size: int = 16) -> None:
+def main(
+    epochs: int = 100,
+    batch_size: int = 16,
+    dataset: str = "sim",
+    from_scratch: bool = False,
+) -> None:
     print(f"Device: {DEVICE}")
 
-    # Data — ImageNet normalisation for pretrained encoder
-    train_ds, val_ds, _ = build_datasets(normalize_imagenet=True)
+    encoder_weights = None if from_scratch else "imagenet"
+    normalize = not from_scratch
+    ckpt_name = "simple_sim_scratch.pt" if from_scratch and dataset == "sim" else "simple_best.pt"
+
+    train_ds, val_ds, _, split = build_datasets(normalize_imagenet=normalize, dataset=dataset)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=2, pin_memory=True)
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
-    print(f"Train: {len(train_ds)} | Val: {len(val_ds)}")
+    print(f"Dataset: {dataset} | Train: {len(train_ds)} | Val: {len(val_ds)} | "
+          f"Encoder: {'scratch' if from_scratch else 'imagenet'} | Split: {split}")
 
-    # Model
     model = smp.Unet(
         encoder_name="resnet18",
-        encoder_weights="imagenet",
+        encoder_weights=encoder_weights,
         in_channels=3,
         classes=1,
         activation=None,   # raw logits; sigmoid in loss
@@ -141,13 +149,14 @@ def main(epochs: int = 100, batch_size: int = 16) -> None:
         if val_iou > best_iou:
             best_iou = val_iou
             torch.save({"epoch": epoch + 1, "state_dict": model.state_dict(),
-                        "val_iou": val_iou}, CKPT_DIR / "simple_best.pt")
+                        "val_iou": val_iou, "dataset": dataset,
+                        "from_scratch": from_scratch}, CKPT_DIR / ckpt_name)
 
         if epoch % 10 == 0:
             save_vis_grid(model, val_loader, epoch)
 
     print(f"\nDone. Best val IoU: {best_iou:.4f}")
-    print(f"Checkpoint: {CKPT_DIR}/simple_best.pt")
+    print(f"Checkpoint: {CKPT_DIR}/{ckpt_name}")
     print(f"Log: {log_path}")
 
 
@@ -155,5 +164,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--dataset", choices=["sim", "synthetic"], default="sim")
+    parser.add_argument("--from-scratch", action="store_true", help="Random init, no ImageNet weights")
     args = parser.parse_args()
-    main(epochs=args.epochs, batch_size=args.batch_size)
+    main(epochs=args.epochs, batch_size=args.batch_size, dataset=args.dataset,
+         from_scratch=args.from_scratch)

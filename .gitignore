@@ -8,3 +8,11 @@ venv/
 
 # Generated dataset — binary, large, reproducible from scripts
 data/
+
+# Training artifacts
+checkpoints/
+logs/
+
+# Large media
+*.mov
+*.mp4

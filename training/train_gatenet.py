@@ -107,14 +107,14 @@ def val_epoch(model, loader):
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-def main(epochs: int = 100, batch_size: int = 16) -> None:
+def main(epochs: int = 100, batch_size: int = 16, dataset: str = "sim") -> None:
     print(f"Device: {DEVICE}")
 
     # Data
-    train_ds, val_ds, _ = build_datasets(normalize_imagenet=False)
+    train_ds, val_ds, _, split = build_datasets(normalize_imagenet=False, dataset=dataset)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=2, pin_memory=True)
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
-    print(f"Train: {len(train_ds)} | Val: {len(val_ds)}")
+    print(f"Dataset: {dataset} | Train: {len(train_ds)} | Val: {len(val_ds)} | Split: {split}")
 
     # Model
     model     = GateNet(f=4).to(DEVICE)
@@ -160,5 +160,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--dataset", choices=["sim", "synthetic"], default="sim")
     args = parser.parse_args()
-    main(epochs=args.epochs, batch_size=args.batch_size)
+    main(epochs=args.epochs, batch_size=args.batch_size, dataset=args.dataset)
