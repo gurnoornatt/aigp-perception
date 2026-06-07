@@ -321,4 +321,4 @@ def build_ui():
 
 if __name__ == "__main__":
     demo = build_ui()
-    demo.launch()
+    demo.launch(share=True)

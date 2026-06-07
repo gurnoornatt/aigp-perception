@@ -6,8 +6,13 @@ Hyperparameters match the paper exactly:
 
 Usage:
     python training/train_gatenet.py
-    python training/train_gatenet.py --epochs 5   # quick smoke test
+    python training/train_gatenet.py --epochs 5                          # quick smoke test
+    python training/train_gatenet.py --epochs 100 --resume checkpoints/gatenet_best.pt
+    python training/train_gatenet.py --epochs 100 --resume checkpoints/gatenet_best.pt \\
+        --fda-target-dir data/sim_captures/
 """
+
+from __future__ import annotations
 
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -15,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import argparse
 import csv
 import math
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -107,39 +113,72 @@ def val_epoch(model, loader):
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-def main(epochs: int = 100, batch_size: int = 16) -> None:
+def main(
+    epochs: int = 100,
+    batch_size: int = 16,
+    resume: str | None = None,
+    fda_target_dir: Path | None = None,
+) -> None:
     print(f"Device: {DEVICE}")
 
     # Data
-    train_ds, val_ds, _ = build_datasets(normalize_imagenet=False)
+    train_ds, val_ds, _ = build_datasets(
+        normalize_imagenet=False,
+        fda_target_dir=fda_target_dir,
+    )
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=2, pin_memory=True)
     val_loader   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
     print(f"Train: {len(train_ds)} | Val: {len(val_ds)}")
 
-    # Model
+    # Model + optimiser + scheduler
     model     = GateNet(f=4).to(DEVICE)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     scheduler = make_scheduler(optimizer, milestones=[10, 33, 66, 90])
 
-    # CSV log
-    log_path = LOG_DIR / "gatenet_train.csv"
-    with open(log_path, "w", newline="") as f:
-        csv.writer(f).writerow(["epoch", "train_loss", "val_loss", "val_iou", "val_dice", "lr"])
+    start_epoch = 0
+    best_iou    = 0.0
 
-    best_iou = 0.0
-    for epoch in range(epochs):
+    # Resume from checkpoint
+    if resume:
+        ckpt_path = Path(resume)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+        ckpt = torch.load(str(ckpt_path), map_location=DEVICE)
+        model.load_state_dict(ckpt["state_dict"])
+        start_epoch = ckpt.get("epoch", 0)
+        best_iou    = ckpt.get("val_iou", 0.0)
+        print(f"Resumed from {ckpt_path} — epoch {start_epoch}, best_iou={best_iou:.4f}")
+
+        # Fast-forward scheduler to match start_epoch so milestones fire correctly
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            for _ in range(start_epoch):
+                scheduler.step()
+        print(f"Scheduler LR after fast-forward: {optimizer.param_groups[0]['lr']:.2e}")
+
+    # CSV log — append if resuming, write header if new
+    log_path = LOG_DIR / "gatenet_train.csv"
+    if resume and log_path.exists():
+        log_mode = "a"
+    else:
+        log_mode = "w"
+        with open(log_path, "w", newline="") as f:
+            csv.writer(f).writerow(["epoch", "train_loss", "val_loss", "val_iou", "val_dice", "lr"])
+
+    for epoch in range(start_epoch, epochs):
         train_loss = train_epoch(model, train_loader, optimizer)
         val_loss, val_iou, val_dice = val_epoch(model, val_loader)
-        current_lr = scheduler.get_last_lr()[0] if epoch > 0 else 1e-3
+        current_lr = optimizer.param_groups[0]["lr"]
         scheduler.step()
 
         print(f"[{epoch+1:03d}/{epochs}] train={train_loss:.4f} val={val_loss:.4f} "
               f"IoU={val_iou:.4f} Dice={val_dice:.4f} lr={current_lr:.2e}")
 
         # Log
-        with open(log_path, "a", newline="") as f:
+        with open(log_path, log_mode, newline="") as f:
             csv.writer(f).writerow([epoch + 1, f"{train_loss:.5f}", f"{val_loss:.5f}",
                                     f"{val_iou:.5f}", f"{val_dice:.5f}", f"{current_lr:.2e}"])
+        log_mode = "a"  # always append after the first write
 
         # Save best
         if val_iou > best_iou:
@@ -147,7 +186,7 @@ def main(epochs: int = 100, batch_size: int = 16) -> None:
             torch.save({"epoch": epoch + 1, "state_dict": model.state_dict(),
                         "val_iou": val_iou}, CKPT_DIR / "gatenet_best.pt")
 
-        # Visualise every 10 epochs (and epoch 0)
+        # Visualise every 10 epochs
         if epoch % 10 == 0:
             save_vis_grid(model, val_loader, epoch)
 
@@ -158,7 +197,17 @@ def main(epochs: int = 100, batch_size: int = 16) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--epochs",         type=int,  default=100)
+    parser.add_argument("--batch_size",     type=int,  default=16)
+    parser.add_argument("--resume",         type=str,  default=None,
+                        help="Path to checkpoint to resume training from")
+    parser.add_argument("--fda-target-dir", type=str,  default=None,
+                        help="Directory of real images for FDA augmentation "
+                             "(e.g. data/sim_captures/)")
     args = parser.parse_args()
-    main(epochs=args.epochs, batch_size=args.batch_size)
+    main(
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        resume=args.resume,
+        fda_target_dir=Path(args.fda_target_dir) if args.fda_target_dir else None,
+    )
