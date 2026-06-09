@@ -33,7 +33,7 @@ import torch
 import torch.nn.functional as F
 
 from training.gatenet import GateNet
-from perception.detect import detect_gates, reset_ekf
+from perception.detect import detect_gates, reset_ekf, update_imu
 from perception.result import MultiGatePerceptionResult
 
 VISION_PORT   = 5601
@@ -109,9 +109,13 @@ def load_gatenet() -> GateNet:
 
 def load_simple():
     import segmentation_models_pytorch as smp
-    ckpt_path = CKPT_DIR / "simple_best.pt"
-    if not ckpt_path.exists():
-        print(f"No checkpoint at {ckpt_path}. Run: python training/train_simple.py --epochs 5")
+    # Prefer sim-trained checkpoint (no ImageNet norm, trained on real sim frames)
+    for name in ["simple_sim_scratch.pt", "simple_best.pt"]:
+        ckpt_path = CKPT_DIR / name
+        if ckpt_path.exists():
+            break
+    else:
+        print(f"No checkpoint found. Run: python training/train_simple.py --epochs 5")
         sys.exit(1)
     model = smp.Unet("resnet18", encoder_weights=None, in_channels=3, classes=1, activation=None).to(DEVICE)
     ckpt  = torch.load(str(ckpt_path), map_location=DEVICE, weights_only=True)
@@ -120,7 +124,8 @@ def load_simple():
     if DEVICE == "mps":
         model = model.half()
         print("Using float16 on MPS")
-    print(f"Loaded Simple UNet from {ckpt_path} (val IoU={ckpt.get('val_iou', 0):.4f})")
+    from_scratch = ckpt.get("from_scratch", False)
+    print(f"Loaded Simple UNet from {ckpt_path} (val IoU={ckpt.get('val_iou', 0):.4f}, from_scratch={from_scratch})")
     return model
 
 
@@ -181,35 +186,60 @@ def overlay_mask(bgr_frame: np.ndarray, mask: np.ndarray, alpha: float = 0.45) -
 
 
 def draw_pose_hud(frame: np.ndarray, result: MultiGatePerceptionResult) -> np.ndarray:
-    """Draw distance, confidence, and reprojection error on the frame."""
-    img = frame.copy()
+    """Draw distance, confidence, reprojection error, gate count, and direction arrow."""
+    img  = frame.copy()
     d    = result.distance_to_next_gate_m
     conf = result.confidence
     err  = result.reprojection_error_px
+    n    = len(result.visible_gate_ids)
 
-    cv2.putText(img, f"dist={d:.2f}m  conf={conf:.2f}  reproj={err:.1f}px",
-                (8, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 2)
+    cv2.putText(img, f"dist={d:.2f}m  conf={conf:.2f}  reproj={err:.1f}px  gates={n}",
+                (8, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 200, 255), 2)
 
-    # Direction arrow pointing toward gate (projected onto image plane)
+    # Direction arrow toward nearest gate
     cx, cy = frame.shape[1] // 2, frame.shape[0] // 2
     vx, _, vz = result.vector_to_next_gate_m
-    if vz > 0.01:  # gate is in front
+    if vz > 0.01:
         arrow_len = 50
         ex = int(cx + vx * arrow_len / max(vz, 0.1))
-        ey = cy  # simplified — no vertical component without pitch
+        ey = cy
         ex = int(np.clip(ex, 10, frame.shape[1] - 10))
         cv2.arrowedLine(img, (cx, cy), (ex, ey), (0, 200, 255), 2, tipLength=0.3)
 
     return img
 
 
+# ── IMU listener (MAVLink HIGHRES_IMU → EKF predict) ─────────────────────────
+
+def _imu_loop(mavlink_port: int) -> None:
+    """Receive HIGHRES_IMU from MAVLink relay and feed to EKF at ~200 Hz."""
+    try:
+        import pymavlink.mavutil as mavutil
+    except ImportError:
+        print("[IMU] pymavlink not installed — IMU fusion disabled")
+        return
+    try:
+        conn = mavutil.mavlink_connection(f"udpin:0.0.0.0:{mavlink_port}")
+        print(f"[IMU] Listening for HIGHRES_IMU on UDP:{mavlink_port}")
+        while True:
+            msg = conn.recv_match(type="HIGHRES_IMU", blocking=True, timeout=1.0)
+            if msg:
+                update_imu(np.array([msg.xacc, msg.yacc, msg.zacc], dtype=np.float32))
+    except Exception as e:
+        print(f"[IMU] Thread error: {e}")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main(use_simple: bool = False) -> None:
+def main(use_simple: bool = False, mavlink_port: int = 14550) -> None:
     model = load_simple() if use_simple else load_gatenet()
-    use_imagenet = use_simple
+    use_imagenet = use_simple and False  # sim_scratch needs no ImageNet norm
     _warmup(model)
     reset_ekf()
+
+    # Start IMU listener — graceful if relay not running
+    imu_t = threading.Thread(target=_imu_loop, args=(mavlink_port,), daemon=True)
+    imu_t.start()
 
     assembler    = FrameAssembler()
     latest_frame = {"img": None, "sim_time_ns": 0, "count": 0}
@@ -302,6 +332,9 @@ def main(use_simple: bool = False) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", choices=["gatenet", "simple"], default="gatenet")
+    parser.add_argument("--model",        choices=["gatenet", "simple"], default="simple",
+                        help="Which model checkpoint to use (default: simple)")
+    parser.add_argument("--mavlink-port", type=int, default=14550,
+                        help="UDP port for MAVLink HIGHRES_IMU (default: 14550)")
     args = parser.parse_args()
-    main(use_simple=(args.model == "simple"))
+    main(use_simple=(args.model == "simple"), mavlink_port=args.mavlink_port)

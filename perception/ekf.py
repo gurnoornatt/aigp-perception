@@ -27,8 +27,8 @@ class DroneEKF:
         self.P = np.eye(6) * 1.0
 
         # Q: how much we trust the IMU prediction (bigger = trust less)
-        self.Q = np.diag([0.01, 0.01, 0.01,   # position noise
-                          0.1,  0.1,  0.1])    # velocity noise
+        self.Q = np.diag([0.01, 0.01, 0.01,    # position noise
+                          0.05, 0.05, 0.05])   # velocity noise — tightened for real IMU
 
         # R: how much we trust PnP measurements (bigger = trust less)
         self.R = np.eye(3) * 0.25

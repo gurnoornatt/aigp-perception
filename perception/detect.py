@@ -10,10 +10,11 @@ from .ekf import DroneEKF
 from .pnp import solve_gate_pnp
 from .result import MultiGatePerceptionResult
 
-# ── Module-level EKF state (persists across frames within a session) ──────────
+# ── Module-level EKF + IMU state (persists across frames within a session) ────
 
 _ekf: DroneEKF | None = None
 _last_time_ns: int = 0
+_imu_accel: np.ndarray = np.zeros(3)   # latest body-frame accel from HIGHRES_IMU
 
 
 def reset_ekf() -> None:
@@ -21,6 +22,12 @@ def reset_ekf() -> None:
     global _ekf, _last_time_ns
     _ekf = DroneEKF()
     _last_time_ns = 0
+
+
+def update_imu(accel_body: np.ndarray) -> None:
+    """Feed latest IMU acceleration. Called from MAVLink thread at ~200 Hz."""
+    global _imu_accel
+    _imu_accel = accel_body.copy()
 
 
 # ── Main pipeline ─────────────────────────────────────────────────────────────
@@ -49,7 +56,7 @@ def detect_gates(
         input_size: model input resolution (384 for GateNet).
         threshold:  sigmoid threshold for binary mask binarisation.
     """
-    global _ekf, _last_time_ns
+    global _ekf, _last_time_ns, _imu_accel
 
     # ── 0. Alpha-channel guard ────────────────────────────────────────────────
     if frame_bgr.ndim == 3 and frame_bgr.shape[2] == 4:
@@ -78,23 +85,33 @@ def detect_gates(
     binary_mask = cv2.resize(binary_small, (W, H), interpolation=cv2.INTER_NEAREST)
     prob_map = cv2.resize(prob_small, (W, H), interpolation=cv2.INTER_LINEAR)
 
-    # ── 3. Quick gate-presence check ─────────────────────────────────────────
-    # 0.3% threshold: a 65×65px hollow gate frame at ~8m fills ~0.8% of 640×360
-    gate_ratio = float((binary_mask > 0).mean())
-    if gate_ratio < 0.003:
+    # ── 3. Find all gate candidates (sorted largest → smallest = closest → farthest)
+    contours, _ = cv2.findContours(binary_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    gate_contours = [c for c in contours if cv2.contourArea(c) > 500]
+    if not gate_contours:
+        return None
+    gate_contours.sort(key=cv2.contourArea, reverse=True)
+
+    # ── 4 & 5. Corners + PnP for each candidate (up to 5 gates) ─────────────
+    gate_results: list[tuple[int, dict, np.ndarray]] = []
+    for i, contour in enumerate(gate_contours[:5]):
+        single_mask = np.zeros_like(binary_mask)
+        cv2.drawContours(single_mask, [contour], -1, 255, -1)
+        corners = extract_corners_from_mask(single_mask)
+        if corners is None:
+            continue
+        pnp = solve_gate_pnp(corners)
+        if pnp is None:
+            continue
+        gate_results.append((i, pnp, corners))
+
+    if not gate_results:
         return None
 
-    # ── 4. Corner extraction ──────────────────────────────────────────────────
-    corners = extract_corners_from_mask(binary_mask)
-    if corners is None:
-        return None
+    # Nearest gate (largest contour = closest) drives EKF and result
+    _, nearest_pnp, _ = gate_results[0]
 
-    # ── 5. PnP solve ──────────────────────────────────────────────────────────
-    pnp = solve_gate_pnp(corners)
-    if pnp is None:
-        return None
-
-    # ── 6. EKF update ─────────────────────────────────────────────────────────
+    # ── 6. EKF update — IMU predict + PnP correct ─────────────────────────────
     if _ekf is None:
         _ekf = DroneEKF()
 
@@ -104,8 +121,8 @@ def detect_gates(
 
     dt = (sim_time_ns - _last_time_ns) / 1e9 if _last_time_ns > 0 else 1.0 / 30.0
     dt = float(np.clip(dt, 0.001, 0.5))
-    _ekf.predict(np.zeros(3), dt)
-    _ekf.update(pnp["tvec_body"])
+    _ekf.predict(_imu_accel, dt)          # real IMU accel (zeros until MAVLink wired)
+    _ekf.update(nearest_pnp["tvec_body"])
     _last_time_ns = sim_time_ns
 
     smoothed_pos = _ekf.position  # (3,) in body frame
@@ -114,22 +131,23 @@ def detect_gates(
     confidence = _compute_confidence(prob_map, binary_mask)
 
     # ── 8. Assemble result ────────────────────────────────────────────────────
-    tvec = pnp["tvec_body"]
+    tvec = nearest_pnp["tvec_body"]
     distance = float(np.linalg.norm(tvec))
     unit_vec = tvec / (distance + 1e-9)
+    visible_ids = tuple(f"gate_{i}" for i, _, _ in gate_results)
 
     return MultiGatePerceptionResult(
         frame_id=frame_id,
         sim_time_ns=sim_time_ns,
-        visible_gate_ids=("gate_0",),
+        visible_gate_ids=visible_ids,
         used_corner_count=4,
         camera_course_position_m=(0.0, 0.0, 0.0),  # no world-frame odometry in v1
-        camera_course_rvec=tuple(float(v) for v in pnp["rvec"]),
-        next_gate_id="gate_0",
+        camera_course_rvec=tuple(float(v) for v in nearest_pnp["rvec"]),
+        next_gate_id=visible_ids[0],
         next_gate_course_position_m=tuple(float(v) for v in smoothed_pos),
         vector_to_next_gate_m=tuple(float(v) for v in unit_vec),
         distance_to_next_gate_m=distance,
-        reprojection_error_px=pnp["reprojection_error_px"],
+        reprojection_error_px=nearest_pnp["reprojection_error_px"],
         confidence=confidence,
     )
 
