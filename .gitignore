@@ -11,9 +11,12 @@ dataset/augmented/
 dataset/raw/
 dataset/sim/
 
-# Training artifacts
+# Training artifacts (root and archive)
 checkpoints/
 logs/
+archive/checkpoints/
+archive/logs/
+archive/experiments/
 
 # Large media
 *.mov
