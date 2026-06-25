@@ -63,7 +63,7 @@ class GatePerceptionPipeline:
         threshold:     float = 0.5,
         base_filters:  int   = 64,
         bilinear:      bool  = True,
-        max_reproj_px: float = 10.0,
+        max_reproj_px: float = 22.0,
     ):
         self.device        = torch.device(device)
         self.img_size      = img_size
