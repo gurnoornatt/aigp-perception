@@ -6,8 +6,10 @@ venv/
 *.egg-info/
 .DS_Store
 
-# Generated dataset — binary, large, reproducible from scripts
-data/
+# Training data — binary, large, reproducible from scripts
+dataset/augmented/
+dataset/raw/
+dataset/sim/
 
 # Training artifacts
 checkpoints/
