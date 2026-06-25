@@ -24,9 +24,10 @@ import albumentations as A
 
 
 def get_train_transforms(size: int = 512) -> A.Compose:
+    # Resize is placed LAST so spatial augmentations (especially RandomScale,
+    # which can grow or shrink the canvas) always produce a fixed output size.
     return A.Compose([
-        A.Resize(size, size),
-        # Geometric
+        # Geometric — applied at native image resolution first
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.2),
         A.Rotate(limit=30, p=0.5),
@@ -35,9 +36,11 @@ def get_train_transforms(size: int = 512) -> A.Compose:
         A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=0.5),
         A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=0.4),
         A.GaussianBlur(blur_limit=(3, 7), p=0.3),
-        # Regularization — randomly blanks small regions to prevent over-reliance
-        # on any single visual cue (e.g., gate color alone).
+        # Regularization — blanks small random regions so the model can't rely
+        # on any single cue (e.g., gate colour alone).
         A.CoarseDropout(num_holes_range=(1, 4), hole_height_range=(16, 32), hole_width_range=(16, 32), p=0.2),
+        # Final resize — always outputs size×size regardless of what came before.
+        A.Resize(size, size),
     ])
 
 

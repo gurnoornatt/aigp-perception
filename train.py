@@ -48,8 +48,11 @@ def get_args() -> argparse.Namespace:
                    help="Initial learning rate for AdamW")
     p.add_argument("--img-size",       type=int,   default=512,
                    help="Square crop/resize resolution fed to the model")
+    p.add_argument("--val-data-dir",   type=Path,  default=None,
+                   help="Separate val set root (images/ + masks/). "
+                        "If given, --val-split is ignored.")
     p.add_argument("--val-split",      type=float, default=0.2,
-                   help="Fraction of data reserved for validation [0, 1)")
+                   help="Fraction of --data-dir reserved for validation (ignored if --val-data-dir set)")
     p.add_argument("--base-filters",   type=int,   default=64,
                    help="Channel width at first encoder block. Use 32 for lightweight.")
     p.add_argument("--bilinear",       action="store_true",
@@ -58,7 +61,8 @@ def get_args() -> argparse.Namespace:
                    help="Enable automatic mixed precision (fp16 on CUDA)")
     p.add_argument("--load",           type=Path,  default=None,
                    help="Path to checkpoint .pt file to resume from")
-    p.add_argument("--num-workers",    type=int,   default=4)
+    p.add_argument("--num-workers",    type=int,   default=0,
+                   help="DataLoader workers (0 = main process; required on Windows)")
     return p.parse_args()
 
 
@@ -68,33 +72,55 @@ def build_dataloaders(args: argparse.Namespace) -> tuple[DataLoader, DataLoader]
     """
     Create train and val DataLoaders with distinct augmentation pipelines.
 
-    Why two separate GateDataset instances?
-    random_split shares the underlying dataset object, so setting transform on
-    one subset would overwrite it for the other. Two instances avoid this bug.
+    If --val-data-dir is given, that directory is used as the fixed validation
+    set (e.g. sim/raw) and --data-dir is used entirely for training.
+    Otherwise, --data-dir is split randomly by --val-split.
+
+    Two separate GateDataset instances are required so each can carry its own
+    transform — a single shared dataset would apply the same transform to both.
     """
-    img_dir  = args.data_dir / "images"
-    mask_dir = args.data_dir / "masks"
-
-    train_ds = GateDataset(img_dir, mask_dir, transform=get_train_transforms(args.img_size))
-    val_ds   = GateDataset(img_dir, mask_dir, transform=get_val_transforms(args.img_size))
-
-    n = len(train_ds)
-    n_val   = max(1, int(n * args.val_split))
-    n_train = n - n_val
-
-    # Fixed seed split — same indices every run for reproducible val set.
-    indices = torch.randperm(n, generator=torch.Generator().manual_seed(42)).tolist()
-    train_loader = DataLoader(
-        Subset(train_ds, indices[n_val:]),
-        batch_size=args.batch_size, shuffle=True,
-        num_workers=args.num_workers, pin_memory=True,
+    train_ds = GateDataset(
+        args.data_dir / "images",
+        args.data_dir / "masks",
+        transform=get_train_transforms(args.img_size),
     )
-    val_loader = DataLoader(
-        Subset(val_ds, indices[:n_val]),
-        batch_size=args.batch_size, shuffle=False,
-        num_workers=args.num_workers, pin_memory=True,
-    )
-    log.info(f"Dataset split — train: {n_train}  val: {n_val}")
+
+    if args.val_data_dir:
+        val_ds = GateDataset(
+            args.val_data_dir / "images",
+            args.val_data_dir / "masks",
+            transform=get_val_transforms(args.img_size),
+        )
+        train_loader = DataLoader(
+            train_ds, batch_size=args.batch_size, shuffle=True,
+            num_workers=args.num_workers, pin_memory=True,
+        )
+        val_loader = DataLoader(
+            val_ds, batch_size=args.batch_size, shuffle=False,
+            num_workers=args.num_workers, pin_memory=True,
+        )
+        log.info(f"Train: {len(train_ds)}  Val: {len(val_ds)} (separate dir)")
+    else:
+        val_ds = GateDataset(
+            args.data_dir / "images",
+            args.data_dir / "masks",
+            transform=get_val_transforms(args.img_size),
+        )
+        n       = len(train_ds)
+        n_val   = max(1, int(n * args.val_split))
+        indices = torch.randperm(n, generator=torch.Generator().manual_seed(42)).tolist()
+        train_loader = DataLoader(
+            Subset(train_ds, indices[n_val:]),
+            batch_size=args.batch_size, shuffle=True,
+            num_workers=args.num_workers, pin_memory=True,
+        )
+        val_loader = DataLoader(
+            Subset(val_ds, indices[:n_val]),
+            batch_size=args.batch_size, shuffle=False,
+            num_workers=args.num_workers, pin_memory=True,
+        )
+        log.info(f"Train: {n - n_val}  Val: {n_val} (random split)")
+
     return train_loader, val_loader
 
 
